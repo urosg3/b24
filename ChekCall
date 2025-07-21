@@ -1,0 +1,79 @@
+import csv
+import requests
+
+BITRIX_WEBHOOK = 'https://yourdomain.bitrix24.com/rest/1/abc1234567890/'
+MIN_DURATION = 30
+
+def process_cdr(csv_file):
+    with open(csv_file, 'r') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            try:
+                src = row[1].strip()
+                duration = int(row[12])
+                disposition = row[14].strip()
+
+                if disposition == 'ANSWERED' and duration > MIN_DURATION:
+                    print(f"Call from {src}, duration: {duration}s — checking lead...")
+                    update_lead_to_next_stage(src)
+            except Exception as e:
+                print("Error:", e)
+
+def update_lead_to_next_stage(phone_number):
+    phone = phone_number if phone_number.startswith('+') else '+381' + phone_number.lstrip('0')
+
+    # 1. Pronađi lead
+    search_url = BITRIX_WEBHOOK + 'crm.lead.list.json'
+    params = {
+        'filter[PHONE]': phone,
+        'select[]': ['ID', 'STATUS_ID']
+    }
+    r = requests.get(search_url, params=params)
+    res = r.json()
+
+    if not res['result']:
+        print(f"No lead found for phone {phone}")
+        return
+
+    lead = res['result'][0]
+    lead_id = lead['ID']
+    current_status = lead['STATUS_ID']
+    print(f"Lead #{lead_id} has current status: {current_status}")
+
+    # 2. Dohvati sve statuse u LEAD funnel-u
+    status_url = BITRIX_WEBHOOK + 'crm.status.list.json'
+    status_data = {
+        'filter[ENTITY_ID]': 'STATUS'  # 'STATUS' je za LEADS
+    }
+    status_res = requests.get(status_url, params=status_data).json()
+
+    status_list = [s for s in status_res['result'] if s['ENTITY_ID'] == 'STATUS']
+    status_ids = [s['STATUS_ID'] for s in status_list]
+    
+    if current_status not in status_ids:
+        print("Current status not found in funnel.")
+        return
+
+    current_index = status_ids.index(current_status)
+    if current_index + 1 >= len(status_ids):
+        print("Already at last status.")
+        return
+
+    next_status = status_ids[current_index + 1]
+    print(f"Moving lead #{lead_id} from {current_status} → {next_status}")
+
+    # 3. Ažuriraj status
+    update_url = BITRIX_WEBHOOK + 'crm.lead.update.json'
+    update_data = {
+        'id': lead_id,
+        'fields': {
+            'STATUS_ID': next_status
+        }
+    }
+
+    update_res = requests.post(update_url, data=update_data)
+    print("Lead updated:", update_res.text)
+
+# Main
+if __name__ == '__main__':
+    process_cdr('/var/log/asterisk/cdr-csv/Master.csv')
